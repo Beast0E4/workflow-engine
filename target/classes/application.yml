@@ -1,0 +1,88 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: workflow-orchestrator
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:workflow_engine}
+    username: ${DB_USERNAME:workflow_user}
+    password: ${DB_PASSWORD:workflow_pass}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      pool-name: workflow-engine-hikari-pool
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 25
+        order_inserts: true
+        order_updates: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 5
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+
+    consumer:
+      group-id: workflow-orchestrator-engine
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      properties:
+        spring.json.trusted.packages: com.enginecorp.workfloworchestrator.dto.messaging
+        isolation.level: read_committed
+
+workflow-engine:
+  kafka:
+    topics:
+      task-dispatch: workflow.task.dispatch
+      task-result: workflow.task.result
+      compensation-dispatch: workflow.compensation.dispatch
+      compensation-result: workflow.compensation.result
+      partitions: 6
+      replication-factor: 1
+
+  retry:
+    default-max-attempts: 3
+    backoff-initial-ms: 2000
+    backoff-multiplier: 2.0
+    scheduler-fixed-delay-ms: 5000
+
+  lock:
+    wait-time-seconds: 5
+    lease-time-seconds: 30
+
+redisson:
+  address: redis://${REDIS_HOST:localhost}:${REDIS_PORT:6379}
+  database: 0
+
+logging:
+  level:
+    com.enginecorp.workfloworchestrator: INFO
+    org.apache.kafka: WARN
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
