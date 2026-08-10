@@ -308,6 +308,7 @@ public class WorkflowOrchestrationServiceImpl implements WorkflowOrchestrationSe
             instance.getWorkflowDefinition().getId(),
             instance.getWorkflowDefinition().getName(),
             instance.getStatus(),
+            deserializePayload(instance.getPayload()),
             instance.getCurrentStepIndex(),
             instance.getFailureReason(),
             stepResponses,
