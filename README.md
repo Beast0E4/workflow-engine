@@ -23,76 +23,91 @@ A production-shaped Saga-pattern orchestrator built with Spring Boot, PostgreSQL
 
 ## Architecture
 
-```
-                                   ┌─────────────────────────┐
-                                   │        Client            │
-                                   │  (Postman / curl / UI)   │
-                                   └────────────┬─────────────┘
-                                                │ REST (HTTP/JSON)
-                                                ▼
- ┌──────────────────────────────────────────────────────────────────────────┐
- │                     workflow-orchestrator  (Spring Boot)                  │
- │                                                                            │
- │   ┌─────────────┐     ┌────────────────────────┐     ┌─────────────────┐ │
- │   │ Controller  │────▶│  WorkflowOrchestration   │────▶│ StepDispatch    │ │
- │   │   Layer     │     │       Service            │     │   Service       │ │
- │   └─────────────┘     └───────────┬─────────────┘     └────────┬────────┘ │
- │                                    │                            │          │
- │                          ┌─────────▼─────────┐                  │          │
- │                          │  Distributed Lock  │                  │          │
- │                          │  Service (Redisson) │                 │          │
- │                          └─────────┬─────────┘                  │          │
- │                                    │                            │          │
- │                          ┌─────────▼─────────┐                  │          │
- │                          │  Compensation      │                  │          │
- │                          │  Service           │                  │          │
- │                          └─────────┬─────────┘                  │          │
- │                                    │                            │          │
- │   ┌────────────────────────────────▼────────────────────────────▼───────┐ │
- │   │                        Repository Layer (Spring Data JPA)           │ │
- │   └────────────────────────────────┬──────────────────────────────────┘ │
- │                                     │                                    │
- │   ┌─────────────────┐    ┌──────────▼─────────┐    ┌───────────────────┐ │
- │   │ TaskResult       │    │  Step Retry         │    │ CompensationResult│ │
- │   │ Listener (Kafka) │    │  Scheduler          │    │ Listener (Kafka)  │ │
- │   └────────┬─────────┘    │  (@Scheduled poll)  │    └─────────┬─────────┘ │
- │            │              └──────────┬──────────┘              │          │
- └────────────┼─────────────────────────┼─────────────────────────┼──────────┘
-              │                         │                         │
-     consumes │                dispatches via                consumes │
-              │              StepDispatchService                     │
-              ▼                         ▼                            ▼
-      ┌───────────────┐        ┌───────────────┐          ┌───────────────────┐
-      │ workflow.task  │        │ workflow.task  │          │ workflow.compens. │
-      │   .result      │◀───┐   │   .dispatch    │──┐       │   .result         │
-      └───────────────┘    │   └───────┬───────┘  │       └───────────────────┘
-                            │           │          │                 ▲
-                            │           ▼          │                 │
-                     ┌──────┴───┐  ┌─────────┐  ┌──▼──────┐   ┌──────┴───────┐
-                     │  Downstream│ │Downstream│  │workflow.│   │ Downstream   │
-                     │  Service A │ │Service B │  │compens. │   │ compensation │
-                     │(reserve-   │ │(charge-  │  │.dispatch│   │ handlers     │
-                     │inventory)  │ │payment)  │  └─────────┘   └──────────────┘
-                     └───────────┘ └──────────┘
+```text
+                                        ┌─────────────────────────┐
+                                        │         Client          │
+                                        │  (Postman / curl / UI)  │
+                                        └────────────┬────────────┘
+                                                     │
+                                            REST (HTTP/JSON)
+                                                     │
+                                                     ▼
 
- ┌───────────────────────────────────────────────────────────────────────────┐
- │                              Infrastructure                                │
- │                                                                             │
- │   ┌─────────────────┐     ┌─────────────────┐     ┌────────────────────┐  │
- │   │   PostgreSQL     │     │   Apache Kafka   │     │       Redis         │  │
- │   │                   │     │  (+ Zookeeper)   │     │    (Redisson)       │  │
- │   │ workflow_definition│    │  4 topics, 6     │     │  Distributed locks  │  │
- │   │ workflow_step_def  │    │  partitions each │     │  keyed per          │  │
- │   │ workflow_instance   │    │                  │     │  workflow instance  │  │
- │   │ step_execution      │    │                  │     │                     │  │
- │   │                     │     │                  │     │                     │  │
- │   │ Flyway-managed      │     │                  │     │                     │  │
- │   │ schema, JSONB        │     │                  │     │                     │  │
- │   │ payload column        │     │                  │     │                     │  │
- │   └─────────────────┘     └─────────────────┘     └────────────────────┘  │
- └───────────────────────────────────────────────────────────────────────────┘
-```
+┌──────────────────────────────────────────────────────────────────────────────────────────────┐
+│                      workflow-orchestrator (Spring Boot)                                     │
+│                                                                                              │
+│  ┌──────────────┐     ┌──────────────────────────┐     ┌─────────────────────┐              │
+│  │ Controller   │────▶│ WorkflowOrchestration    │────▶│ StepDispatchService │              │
+│  │ Layer        │     │ Service                  │     └──────────┬──────────┘              │
+│  └──────────────┘     └────────────┬─────────────┘                │                         │
+│                                    │                              │                         │
+│                        ┌───────────▼───────────┐                  │                         │
+│                        │ Distributed Lock      │                  │                         │
+│                        │ Service (Redisson)    │                  │                         │
+│                        └───────────┬───────────┘                  │                         │
+│                                    │                              │                         │
+│                        ┌───────────▼───────────┐                  │                         │
+│                        │ CompensationService   │                  │                         │
+│                        └───────────┬───────────┘                  │                         │
+│                                    │                              │                         │
+│                                    ▼                              ▼                         │
+│  ┌────────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                  Repository Layer (Spring Data JPA)                                   │  │
+│  └───────────────────────────────────┬────────────────────────────────────────────────────┘  │
+│                                      │                                                       │
+│  ┌────────────────────┐  ┌───────────▼───────────┐  ┌────────────────────┐                  │
+│  │ TaskResultListener │  │ StepRetryScheduler   │  │ CompensationResult │                  │
+│  │ (Kafka)            │  │ (@Scheduled poll)    │  │ Listener (Kafka)   │                  │
+│  └─────────┬──────────┘  └───────────┬───────────┘  └─────────┬──────────┘                  │
+└────────────┼─────────────────────────┼─────────────────────────┼─────────────────────────────┘
+             │                         │                         │
+             │ consumes                │ redispatches           │ consumes
+             ▼                         ▼                         ▼
 
+     ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────────┐
+     │ workflow.task   │     │ workflow.task   │     │ workflow.compensation│
+     │ .result         │◀────│ .dispatch       │────▶│ .result             │
+     └─────────────────┘     └────────┬────────┘     └─────────────────────┘
+                                      │
+                                      ▼
+                         ┌─────────────────────────┐
+                         │ Downstream Services     │
+                         │                         │
+                         │ • reserve-inventory     │
+                         │ • charge-payment        │
+                         └────────────┬────────────┘
+                                      │
+                                      ▼
+                         ┌─────────────────────────┐
+                         │ workflow.compensation   │
+                         │ .dispatch               │
+                         └────────────┬────────────┘
+                                      │
+                                      ▼
+                         ┌─────────────────────────┐
+                         │ Compensation Handlers   │
+                         │                         │
+                         │ • release-inventory     │
+                         │ • refund-payment        │
+                         └─────────────────────────┘
+
+
+┌──────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    Infrastructure                                            │
+│                                                                                              │
+│  ┌────────────────────┐   ┌────────────────────┐   ┌────────────────────┐                  │
+│  │ PostgreSQL         │   │ Apache Kafka       │   │ Redis              │                  │
+│  │                    │   │                    │   │ (Redisson)         │                  │
+│  │ workflow_definition│   │ 4 topics           │   │ Distributed locks  │                  │
+│  │ workflow_step_def  │   │ 6 partitions each  │   │ per workflow       │                  │
+│  │ workflow_instance  │   │                    │   │ instance           │                  │
+│  │ step_execution     │   │                    │   │                    │                  │
+│  │                    │   │                    │   │                    │                  │
+│  │ Flyway migrations  │   │ Durable messaging  │   │ Lock coordination  │                  │
+│  │ JSONB payloads     │   │ Ordered processing │   │ Watchdog renewal   │                  │
+│  └────────────────────┘   └────────────────────┘   └────────────────────┘                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+```
 **Layering discipline enforced throughout:**
 
 ```
