@@ -111,6 +111,21 @@ public class WorkflowOrchestrationServiceImpl implements WorkflowOrchestrationSe
             .orElseThrow(() -> new WorkflowInstanceNotFoundException(workflowInstanceId));
 
         StepExecution completedStep = findStepExecution(instance, stepExecutionId);
+
+        if (completedStep.getStatus() == StepStatus.COMPLETED) {
+            logger.debug("Ignoring duplicate success result for step {} — already COMPLETED", stepExecutionId);
+            return;
+        }
+
+        if (completedStep.getStatus() != StepStatus.DISPATCHED) {
+            logger.warn(
+                "Ignoring success result for step {} in unexpected state {} — expected DISPATCHED",
+                stepExecutionId,
+                completedStep.getStatus()
+            );
+            return;
+        }
+
         completedStep.setStatus(StepStatus.COMPLETED);
         completedStep.setCompletedAt(Instant.now());
 
@@ -118,14 +133,9 @@ public class WorkflowOrchestrationServiceImpl implements WorkflowOrchestrationSe
         instance.setCurrentStepIndex(nextStepIndex);
 
         int totalSteps = instance.getWorkflowDefinition().getSteps().size();
-
         if (nextStepIndex >= totalSteps) {
             instance.setStatus(WorkflowStatus.COMPLETED);
-            logger.info(
-                "Workflow instance {} completed all {} steps",
-                workflowInstanceId,
-                totalSteps
-            );
+            logger.info("Workflow instance {} completed all {} steps", workflowInstanceId, totalSteps);
         } else {
             dispatchStepAtIndex(instance, nextStepIndex);
         }
@@ -146,29 +156,31 @@ public class WorkflowOrchestrationServiceImpl implements WorkflowOrchestrationSe
     }
 
     @Transactional
-    protected void handleStepFailureLocked(
-        UUID workflowInstanceId,
-        UUID stepExecutionId,
-        String errorMessage
-    ) {
+    protected void handleStepFailureLocked(UUID workflowInstanceId, UUID stepExecutionId, String errorMessage) {
         WorkflowInstance instance = workflowInstanceRepository.findByIdForUpdate(workflowInstanceId)
             .orElseThrow(() -> new WorkflowInstanceNotFoundException(workflowInstanceId));
 
         StepExecution failedStep = findStepExecution(instance, stepExecutionId);
+
+        if (failedStep.getStatus() != StepStatus.DISPATCHED) {
+            logger.debug(
+                "Ignoring failure result for step {} in state {} — expected DISPATCHED, likely a duplicate delivery",
+                stepExecutionId,
+                failedStep.getStatus()
+            );
+            return;
+        }
+
         failedStep.setAttemptCount(failedStep.getAttemptCount() + 1);
         failedStep.setLastError(errorMessage);
 
         if (failedStep.hasExceededRetryLimit()) {
             failedStep.setStatus(StepStatus.FAILED);
             failedStep.setNextRetryAt(null);
-
             instance.setStatus(WorkflowStatus.COMPENSATING);
             instance.setFailureReason(errorMessage);
-
             workflowInstanceRepository.save(instance);
-
             compensationService.beginCompensation(workflowInstanceId);
-
             logger.warn(
                 "Step {} exhausted retry budget for workflow instance {}, entering compensation",
                 failedStep.getStepDefinition().getTaskName(),
@@ -177,9 +189,7 @@ public class WorkflowOrchestrationServiceImpl implements WorkflowOrchestrationSe
         } else {
             failedStep.setStatus(StepStatus.FAILED);
             failedStep.setNextRetryAt(computeNextRetryTime(failedStep.getAttemptCount()));
-
             workflowInstanceRepository.save(instance);
-
             logger.info(
                 "Step {} scheduled for retry attempt {} at {}",
                 failedStep.getStepDefinition().getTaskName(),

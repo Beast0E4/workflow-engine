@@ -1,488 +1,377 @@
-# Workflow Orchestrator
+# Distributed Workflow Engine
 
-A distributed workflow orchestration engine built with Spring Boot, PostgreSQL, Kafka, and Redis/Redisson.
-
-The service enables definition and execution of multi-step workflows, supports asynchronous task execution through Kafka, automatic retries, distributed locking, and Saga-style compensation for failed workflows.
+A production-shaped Saga-pattern orchestrator built with Spring Boot, PostgreSQL, Apache Kafka, and Redis. It accepts declarative workflow definitions, executes their steps asynchronously against downstream services, retries transient failures with backoff, and rolls back completed work via compensation when a step exhausts its retries.
 
 ---
 
-## Features
+## Table of Contents
 
-- Workflow definition management
-- Versioned workflow definitions
-- Multi-step workflow execution
-- Kafka-based asynchronous task dispatch
-- Distributed workflow coordination
-- Retry scheduling with exponential backoff
-- Saga compensation support
-- Optimistic locking for concurrency control
-- Distributed locking with Redisson
-- PostgreSQL persistence
-- Flyway database migrations
-- REST APIs for workflow management
-- Health, metrics, and actuator endpoints
+- [Architecture](#architecture)
+- [How a Workflow Executes](#how-a-workflow-executes)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Quick Start (Docker Compose)](#quick-start-docker-compose)
+- [Running Locally Against Docker Infra](#running-locally-against-docker-infra)
+- [Configuration Reference](#configuration-reference)
+- [API Reference](#api-reference)
+- [Testing](#testing)
+- [Observability](#observability)
+- [Scope and Limitations](#scope-and-limitations)
 
 ---
 
 ## Architecture
 
-```text
-                   +-------------------+
-                   |   REST Clients    |
-                   +---------+---------+
-                             |
-                             v
-                  +----------------------+
-                  | Workflow Orchestrator|
-                  +----------+-----------+
-                             |
-             +---------------+----------------+
-             |                                |
-             v                                v
-     +---------------+              +----------------+
-     | PostgreSQL    |              | Redis/Redisson |
-     | Persistence   |              | Distributed    |
-     |               |              | Locks          |
-     +---------------+              +----------------+
-             |
-             v
-     +------------------+
-     | Workflow State   |
-     | & Definitions    |
-     +------------------+
+```
+                                   ┌─────────────────────────┐
+                                   │        Client            │
+                                   │  (Postman / curl / UI)   │
+                                   └────────────┬─────────────┘
+                                                │ REST (HTTP/JSON)
+                                                ▼
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │                     workflow-orchestrator  (Spring Boot)                  │
+ │                                                                            │
+ │   ┌─────────────┐     ┌────────────────────────┐     ┌─────────────────┐ │
+ │   │ Controller  │────▶│  WorkflowOrchestration   │────▶│ StepDispatch    │ │
+ │   │   Layer     │     │       Service            │     │   Service       │ │
+ │   └─────────────┘     └───────────┬─────────────┘     └────────┬────────┘ │
+ │                                    │                            │          │
+ │                          ┌─────────▼─────────┐                  │          │
+ │                          │  Distributed Lock  │                  │          │
+ │                          │  Service (Redisson) │                 │          │
+ │                          └─────────┬─────────┘                  │          │
+ │                                    │                            │          │
+ │                          ┌─────────▼─────────┐                  │          │
+ │                          │  Compensation      │                  │          │
+ │                          │  Service           │                  │          │
+ │                          └─────────┬─────────┘                  │          │
+ │                                    │                            │          │
+ │   ┌────────────────────────────────▼────────────────────────────▼───────┐ │
+ │   │                        Repository Layer (Spring Data JPA)           │ │
+ │   └────────────────────────────────┬──────────────────────────────────┘ │
+ │                                     │                                    │
+ │   ┌─────────────────┐    ┌──────────▼─────────┐    ┌───────────────────┐ │
+ │   │ TaskResult       │    │  Step Retry         │    │ CompensationResult│ │
+ │   │ Listener (Kafka) │    │  Scheduler          │    │ Listener (Kafka)  │ │
+ │   └────────┬─────────┘    │  (@Scheduled poll)  │    └─────────┬─────────┘ │
+ │            │              └──────────┬──────────┘              │          │
+ └────────────┼─────────────────────────┼─────────────────────────┼──────────┘
+              │                         │                         │
+     consumes │                dispatches via                consumes │
+              │              StepDispatchService                     │
+              ▼                         ▼                            ▼
+      ┌───────────────┐        ┌───────────────┐          ┌───────────────────┐
+      │ workflow.task  │        │ workflow.task  │          │ workflow.compens. │
+      │   .result      │◀───┐   │   .dispatch    │──┐       │   .result         │
+      └───────────────┘    │   └───────┬───────┘  │       └───────────────────┘
+                            │           │          │                 ▲
+                            │           ▼          │                 │
+                     ┌──────┴───┐  ┌─────────┐  ┌──▼──────┐   ┌──────┴───────┐
+                     │  Downstream│ │Downstream│  │workflow.│   │ Downstream   │
+                     │  Service A │ │Service B │  │compens. │   │ compensation │
+                     │(reserve-   │ │(charge-  │  │.dispatch│   │ handlers     │
+                     │inventory)  │ │payment)  │  └─────────┘   └──────────────┘
+                     └───────────┘ └──────────┘
 
-             |
-             v
+ ┌───────────────────────────────────────────────────────────────────────────┐
+ │                              Infrastructure                                │
+ │                                                                             │
+ │   ┌─────────────────┐     ┌─────────────────┐     ┌────────────────────┐  │
+ │   │   PostgreSQL     │     │   Apache Kafka   │     │       Redis         │  │
+ │   │                   │     │  (+ Zookeeper)   │     │    (Redisson)       │  │
+ │   │ workflow_definition│    │  4 topics, 6     │     │  Distributed locks  │  │
+ │   │ workflow_step_def  │    │  partitions each │     │  keyed per          │  │
+ │   │ workflow_instance   │    │                  │     │  workflow instance  │  │
+ │   │ step_execution      │    │                  │     │                     │  │
+ │   │                     │     │                  │     │                     │  │
+ │   │ Flyway-managed      │     │                  │     │                     │  │
+ │   │ schema, JSONB        │     │                  │     │                     │  │
+ │   │ payload column        │     │                  │     │                     │  │
+ │   └─────────────────┘     └─────────────────┘     └────────────────────┘  │
+ └───────────────────────────────────────────────────────────────────────────┘
+```
 
-     +------------------+
-     | Kafka Topics     |
-     +------------------+
-             |
-    +--------+---------+
-    |                  |
-    v                  v
+**Layering discipline enforced throughout:**
 
-Task Workers    Compensation Workers
-    |                  |
-    +--------+---------+
-             |
-             v
-      Result Topics
-             |
-             v
-Workflow Orchestrator
+```
+controller/          → REST endpoints only. Depends on service interfaces.
+service/              → interfaces only (contracts, no logic)
+service/impl/         → @Service implementations (all business logic lives here)
+repository/           → Spring Data JPA interfaces only
+repository/impl/      → custom repository implementations (native queries)
+model/                → JPA entities + state enums (WorkflowStatus, StepStatus)
+dto/request           → inbound REST payloads
+dto/response          → outbound REST payloads
+dto/messaging         → Kafka message contracts
+config/               → Kafka, Redis, JPA, async, Jackson configuration
+exception/            → domain exceptions + global @RestControllerAdvice
+worker/                → Kafka @KafkaListener consumers + @Scheduled retry sweeper
 ```
 
 ---
 
-## Technology Stack
+## How a Workflow Executes
 
-| Component | Technology |
-|------------|------------|
-| Language | Java 18 |
-| Framework | Spring Boot |
-| Database | PostgreSQL |
-| Messaging | Apache Kafka |
-| Distributed Locking | Redis + Redisson |
-| ORM | Spring Data JPA / Hibernate |
-| Migrations | Flyway |
-| Build Tool | Maven |
-| Validation | Jakarta Validation |
-| Monitoring | Spring Actuator |
+```
+1. POST /api/v1/workflow-definitions
+      │  Define an ordered list of steps, each with a task name,
+      │  target Kafka topic, optional compensation task, retry limit.
+      ▼
+2. POST /api/v1/workflow-instances
+      │  Starts a run. Instance persisted with status = RUNNING.
+      │  First step dispatched immediately to its target topic.
+      ▼
+3. Downstream service consumes from its topic, does the work,
+   publishes a TaskResultMessage to workflow.task.result.
+      │
+      ▼
+4. TaskResultListener consumes the result:
+      │
+      ├── successful=true  → advance to next step, or mark COMPLETED
+      │                       if this was the last step.
+      │
+      └── successful=false → increment attempt count.
+             │
+             ├── within retry limit → status=FAILED, nextRetryAt set.
+             │                         StepRetryScheduler picks it up
+             │                         and re-dispatches after backoff.
+             │
+             └── retry limit exceeded → instance status=COMPENSATING.
+                                          CompensationService dispatches
+                                          compensation for the most
+                                          recently completed step.
+      ▼
+5. Compensation cascades backward through every COMPLETED step that
+   declares a compensationTaskName, until none remain.
+   Instance status becomes COMPENSATED.
+```
+
+Every state mutation above is wrapped in a Redis-backed distributed lock keyed by the workflow instance ID, so concurrent Kafka consumer threads — even across multiple application instances — cannot race on the same instance's state.
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Why |
+|---|---|---|
+| Application framework | Spring Boot 3.3 (Java 17) | Declarative transactions, mature Kafka/Redis integration, clean DI for strict layering |
+| System of record | PostgreSQL 16 | MVCC-backed optimistic locking, native JSONB for workflow payloads |
+| Schema management | Flyway | Versioned, auditable migrations; `ddl-auto: validate` catches entity/schema drift immediately |
+| Async transport | Apache Kafka | Partition-ordered delivery per instance, durable replay, idempotent producers |
+| Distributed locking | Redis + Redisson | Watchdog-renewed lock leases remove manual lease-tuning |
+| Containerization | Docker Compose | One-command reproducible topology with health-check-gated startup |
 
 ---
 
 ## Project Structure
 
-```text
-src/main/java/com/enginecorp/workfloworchestrator
-
-├── config
-│   ├── AsyncExecutorConfig
-│   ├── JpaAuditingConfig
-│   ├── KafkaConsumerConfig
-│   ├── KafkaProducerConfig
-│   ├── KafkaTopicConfig
-│   └── RedissonConfig
-│
-├── controller
-│   ├── WorkflowDefinitionController
-│   └── WorkflowInstanceController
-│
-├── dto
-│   ├── messaging
-│   ├── request
-│   └── response
-│
-├── exception
-│
-├── model
-│
-├── repository
-│
-├── service
-│   └── impl
-│
-└── worker
-    ├── TaskResultListener
-    ├── CompensationResultListener
-    └── StepRetryScheduler
+```
+workflow-engine/
+├── pom.xml
+├── Dockerfile
+├── docker-compose.yml
+├── src/
+│   ├── main/
+│   │   ├── java/com/enginecorp/workfloworchestrator/
+│   │   │   ├── WorkflowOrchestratorApplication.java
+│   │   │   ├── controller/
+│   │   │   ├── service/            (+ impl/)
+│   │   │   ├── repository/         (+ impl/)
+│   │   │   ├── model/
+│   │   │   ├── dto/
+│   │   │   │   ├── request/
+│   │   │   │   ├── response/
+│   │   │   │   └── messaging/
+│   │   │   ├── config/
+│   │   │   ├── exception/
+│   │   │   └── worker/
+│   │   └── resources/
+│   │       ├── application.yml
+│   │       └── db/migration/
+│   │           ├── V1__create_workflow_definition_tables.sql
+│   │           └── V2__create_workflow_instance_tables.sql
+│   └── test/
+│       └── java/com/enginecorp/workfloworchestrator/
+│           ├── service/impl/WorkflowOrchestrationServiceImplTest.java
+│           └── WorkflowInstanceIT.java
 ```
 
 ---
 
-## Database Schema
+## Prerequisites
 
-### Workflow Definition
-
-Represents a reusable workflow template.
-
-```text
-WorkflowDefinition
- ├── id
- ├── name
- ├── version
- ├── description
- ├── active
- └── steps
-```
-
-### Workflow Step Definition
-
-Represents a step inside a workflow.
-
-```text
-WorkflowStepDefinition
- ├── stepOrder
- ├── taskName
- ├── compensationTaskName
- ├── retryLimit
- ├── timeoutMs
- └── targetTopic
-```
-
-### Workflow Instance
-
-Represents a running workflow execution.
-
-```text
-WorkflowInstance
- ├── id
- ├── status
- ├── currentStepIndex
- ├── payload
- ├── failureReason
- └── stepExecutions
-```
-
-### Step Execution
-
-Tracks execution state of an individual workflow step.
-
-```text
-StepExecution
- ├── status
- ├── attemptCount
- ├── lastError
- ├── nextRetryAt
- ├── startedAt
- └── completedAt
-```
+- **Docker Desktop** (with the Engine running — verify with `docker info`)
+- **JDK 17** (only needed if running outside Docker)
+- **Maven wrapper** (`mvnw` / `mvnw.cmd`) — included; if missing, generate with `mvn wrapper:wrapper`
 
 ---
 
-## Workflow Lifecycle
+## Quick Start (Docker Compose)
 
-### Workflow States
-
-```text
-CREATED
-   |
-   v
-RUNNING
-   |
-   +----------------+
-   |                |
-   v                v
-COMPLETED       FAILED
-                    |
-                    v
-             COMPENSATING
-                    |
-                    v
-             COMPENSATED
-```
-
-### Step States
-
-```text
-PENDING
-   |
-   v
-DISPATCHED
-   |
-   v
-RUNNING
-   |
-   +----------------+
-   |                |
-   v                v
-COMPLETED        FAILED
-                    |
-                    +------------+
-                    |            |
-                    v            v
-              RETRY         COMPENSATING
-                                  |
-                                  v
-                            COMPENSATED
-```
-
----
-
-## Kafka Topics
-
-| Topic | Purpose |
-|---------|---------|
-| workflow.task.dispatch | Dispatch workflow tasks |
-| workflow.task.result | Receive task execution results |
-| workflow.compensation.dispatch | Dispatch compensation tasks |
-| workflow.compensation.result | Receive compensation results |
-
-Default configuration:
-
-```yaml
-workflow-engine:
-  kafka:
-    topics:
-      task-dispatch: workflow.task.dispatch
-      task-result: workflow.task.result
-      compensation-dispatch: workflow.compensation.dispatch
-      compensation-result: workflow.compensation.result
-      partitions: 6
-      replication-factor: 1
-```
-
----
-
-## Retry Strategy
-
-Failed steps are automatically retried.
-
-Configuration:
-
-```yaml
-workflow-engine:
-  retry:
-    default-max-attempts: 3
-    backoff-initial-ms: 2000
-    backoff-multiplier: 2.0
-    scheduler-fixed-delay-ms: 5000
-```
-
-Example retry schedule:
-
-```text
-Attempt 1 -> Failure
-
-Wait 2 seconds
-
-Attempt 2 -> Failure
-
-Wait 4 seconds
-
-Attempt 3 -> Failure
-
-Workflow Failure
-```
-
----
-
-## Compensation (Saga Pattern)
-
-When a workflow step exceeds retry limits:
-
-1. Workflow enters FAILED state
-2. Workflow enters COMPENSATING state
-3. Completed steps are compensated in reverse order
-4. Compensation messages are sent through Kafka
-5. Workflow becomes COMPENSATED
-
-Example:
-
-```text
-Create Order        ✓
-Reserve Inventory   ✓
-Process Payment     ✗
-
-Compensation Begins
-
-Reserve Inventory Compensation
-Create Order Compensation
-
-Workflow -> COMPENSATED
-```
-
----
-
-## Configuration
-
-### Application Configuration
-
-```yaml
-server:
-  port: 8080
-
-spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5432/workflow_engine
-    username: workflow_user
-    password: workflow_pass
-
-  kafka:
-    bootstrap-servers: localhost:9092
-
-redisson:
-  address: redis://localhost:6379
-  database: 0
-```
-
----
-
-## Running Locally
-
-### Prerequisites
-
-- Java 18+
-- Maven 3.9+
-- PostgreSQL
-- Apache Kafka
-- Redis
-
-### Build
+This brings up the entire system — Postgres, Zookeeper, Kafka, Redis, a Kafka UI, and the application itself — with one command.
 
 ```bash
-mvn clean compile
+# 1. Clone and enter the project
+cd workflow-engine
+
+# 2. Build the app image and start everything
+docker compose up -d --build
+
+# 3. Confirm all six services are healthy
+docker compose ps
+
+# 4. Watch the application boot (Flyway migrations, Kafka listeners, Tomcat)
+docker compose logs -f workflow-orchestrator
 ```
 
-### Run Tests
+Wait for this line in the logs before sending requests — it confirms the app is actually ready, not just started:
+
+```
+Tomcat started on port 8080 (http) with context path '/'
+```
+
+### Verify it's working
 
 ```bash
-mvn test
+curl -X POST http://localhost:8080/api/v1/workflow-definitions \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "order-fulfillment",
+        "description": "Reserve inventory then charge payment",
+        "steps": [
+          { "taskName": "reserve-inventory", "compensationTaskName": "release-inventory", "targetTopic": "inventory.tasks", "retryLimit": 2, "timeoutMs": 15000 },
+          { "taskName": "charge-payment", "compensationTaskName": "refund-payment", "targetTopic": "payment.tasks", "retryLimit": 2, "timeoutMs": 15000 }
+        ]
+      }'
 ```
-
-### Start Application
 
 ```bash
-mvn spring-boot:run
+curl -X POST http://localhost:8080/api/v1/workflow-instances \
+  -H "Content-Type: application/json" \
+  -d '{ "workflowDefinitionId": "<id-from-previous-response>", "payload": { "orderId": "ORD-1001" } }'
 ```
-
-Or
 
 ```bash
-java -jar target/workflow-orchestrator.jar
+curl http://localhost:8080/api/v1/workflow-instances/<instance-id>
 ```
 
----
+### Services and ports
 
-## API Overview
+| Service | Port | Purpose |
+|---|---|---|
+| `workflow-orchestrator` | `8080` | The application's REST API |
+| `postgres` | `5432` | Database |
+| `kafka` | `9092` | Broker (external) |
+| `kafka-ui` | `8090` | Browse topics, messages, consumer groups |
+| `redis` | `6379` | Distributed lock backend |
 
-### Create Workflow Definition
+### Simulating a downstream task result
 
-```http
-POST /api/workflows/definitions
+No real downstream services are included — this engine dispatches to Kafka topics that any real service would consume. To simulate one manually for local testing:
+
+```bash
+docker exec -it workflow-engine-kafka kafka-console-producer \
+  --bootstrap-server localhost:9092 \
+  --topic workflow.task.result
 ```
 
-Example:
+Paste a line and press Enter:
 
 ```json
-{
-  "name": "order-processing",
-  "description": "Order processing workflow",
-  "steps": [
-    {
-      "taskName": "create-order",
-      "targetTopic": "order-service",
-      "retryLimit": 3,
-      "timeoutMs": 30000
-    },
-    {
-      "taskName": "reserve-inventory",
-      "compensationTaskName": "release-inventory",
-      "targetTopic": "inventory-service",
-      "retryLimit": 3,
-      "timeoutMs": 30000
-    }
-  ]
-}
+{"workflowInstanceId":"<instance-id>","stepExecutionId":"<step-id-from-GET-response>","successful":true,"errorMessage":null,"resultPayload":{}}
+```
+
+Re-run the `GET /api/v1/workflow-instances/<instance-id>` call to see the instance advance to the next step.
+
+### Tear down
+
+```bash
+docker compose down       # stop containers, keep data
+docker compose down -v    # stop containers, wipe the Postgres volume too
 ```
 
 ---
 
-### Start Workflow
+## Running Locally Against Docker Infra
 
-```http
-POST /api/workflows/start
+For faster iteration during development, run the app on your host machine while only the infrastructure runs in Docker.
+
+```bash
+# Start infra only
+docker compose up -d postgres zookeeper kafka redis kafka-ui
+
+# Run the app directly — application.yml defaults already match the compose file
+./mvnw spring-boot:run
 ```
 
-Example:
+No environment variables are needed for this mode — `application.yml`'s `${DB_HOST:localhost}`-style defaults line up with the ports Docker Compose publishes to your host.
 
-```json
-{
-  "workflowDefinitionId": "workflow-uuid",
-  "payload": {
-    "orderId": "12345",
-    "customerId": "cust-001"
-  }
-}
+---
+
+## Configuration Reference
+
+All configuration lives in `src/main/resources/application.yml`, using `${VARIABLE:default}` placeholders. Override via environment variables, an IDE run configuration, or a `.env` file consumed by `docker-compose.yml`.
+
+| Variable | Default | Used By |
+|---|---|---|
+| `DB_HOST` | `localhost` | Postgres connection |
+| `DB_PORT` | `5432` | Postgres connection |
+| `DB_NAME` | `workflow_engine` | Postgres connection |
+| `DB_USERNAME` | `workflow_user` | Postgres connection |
+| `DB_PASSWORD` | `workflow_pass` | Postgres connection |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka producer/consumer |
+| `REDIS_HOST` | `localhost` | Redisson client |
+| `REDIS_PORT` | `6379` | Redisson client |
+
+> **Never commit real credentials.** For any non-local environment, source `DB_PASSWORD` from a secrets manager (AWS Secrets Manager, Kubernetes Secret, HashiCorp Vault) that populates the environment variable at container start — the app doesn't need to know or care where the value came from.
+
+---
+
+## API Reference
+
+### Workflow Definitions
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/v1/workflow-definitions` | Create a new (or new-version) workflow definition |
+| `GET` | `/api/v1/workflow-definitions/{id}` | Fetch a single definition |
+| `GET` | `/api/v1/workflow-definitions` | List all active definitions |
+
+### Workflow Instances
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/v1/workflow-instances` | Start a new run of a definition |
+| `GET` | `/api/v1/workflow-instances/{id}` | Get full current state, including step history |
+
+---
+
+## Testing
+
+```bash
+# Fast unit tests only — no Docker required
+./mvnw test
+
+# Unit tests + Testcontainers-backed integration tests (requires Docker running)
+./mvnw verify
 ```
 
----
-
-### Get Workflow Instance
-
-```http
-GET /api/workflows/{workflowInstanceId}
-```
+The integration test (`WorkflowInstanceIT`) spins up real Postgres, Kafka, and Redis containers via Testcontainers, boots the full Spring context, and exercises the actual REST API — not mocks.
 
 ---
 
-## Monitoring
+## Observability
 
-Spring Boot Actuator endpoints:
-
-```text
-/actuator/health
-/actuator/info
-/actuator/metrics
-```
+- **Kafka UI** — `http://localhost:8090` — inspect topics, partitions, and individual messages for `workflow.task.dispatch`, `workflow.task.result`, `workflow.compensation.dispatch`, `workflow.compensation.result`, and their `.dlt` dead-letter counterparts.
+- **Actuator** — `http://localhost:8080/actuator/health` and `/actuator/metrics` are exposed.
+- **`GET /api/v1/workflow-instances/{id}`** — the primary tool for debugging a specific run: current status, current step index, failure reason if any, and the full per-step attempt history.
 
 ---
 
-## Concurrency and Consistency
+## Scope and Limitations
 
-The engine uses:
+This is a **linear saga executor**: a fixed, ordered list of steps with retry-then-compensate semantics. It is well suited to coordinating a handful of services with compensating rollbacks, and every feature described above has been verified against real infrastructure, not just unit-tested in isolation.
 
-- Optimistic locking via `@Version`
-- Distributed locking via Redisson
-- Kafka idempotent producers
-- Manual Kafka acknowledgements
-- Transactional state transitions
-
-This prevents duplicate workflow progression in clustered deployments.
-
----
-
-## Future Improvements
-
-- Workflow visualization UI
-- Workflow version deprecation
-- Dead-letter queue support
-- OpenTelemetry tracing
-- Dynamic retry policies
-- Workflow pause/resume
-- Scheduled workflow execution
-- Multi-tenant support
-- Workflow state machine framework integration
-
----
+It is **not** a substitute for a full workflow platform (e.g. Temporal) when the problem requires arbitrary branching logic, long-running human-in-the-loop approvals, or deterministic replay guarantees — those require a fundamentally different execution model built around replaying arbitrary code rather than advancing a state machine row by row.

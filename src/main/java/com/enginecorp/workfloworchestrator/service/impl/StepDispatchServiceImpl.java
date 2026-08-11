@@ -1,21 +1,16 @@
 package com.enginecorp.workfloworchestrator.service.impl;
 
 import com.enginecorp.workfloworchestrator.dto.messaging.TaskDispatchMessage;
-import com.enginecorp.workfloworchestrator.dto.messaging.TaskResultMessage;
-import com.enginecorp.workfloworchestrator.exception.WorkflowInstanceNotFoundException;
 import com.enginecorp.workfloworchestrator.model.StepExecution;
 import com.enginecorp.workfloworchestrator.model.StepStatus;
 import com.enginecorp.workfloworchestrator.model.WorkflowInstance;
 import com.enginecorp.workfloworchestrator.repository.StepExecutionRepository;
-import com.enginecorp.workfloworchestrator.repository.WorkflowInstanceRepository;
 import com.enginecorp.workfloworchestrator.service.StepDispatchService;
-import com.enginecorp.workfloworchestrator.service.WorkflowOrchestrationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,34 +22,23 @@ public class StepDispatchServiceImpl implements StepDispatchService {
 
     private final KafkaTemplate<String, Object> workflowKafkaTemplate;
     private final StepExecutionRepository stepExecutionRepository;
-    private final WorkflowInstanceRepository workflowInstanceRepository;
-    private final WorkflowOrchestrationService workflowOrchestrationService;
     private final ObjectMapper objectMapper;
 
     public StepDispatchServiceImpl(
         KafkaTemplate<String, Object> workflowKafkaTemplate,
         StepExecutionRepository stepExecutionRepository,
-        WorkflowInstanceRepository workflowInstanceRepository,
-        @Lazy WorkflowOrchestrationService workflowOrchestrationService,
         ObjectMapper objectMapper
     ) {
         this.workflowKafkaTemplate = workflowKafkaTemplate;
         this.stepExecutionRepository = stepExecutionRepository;
-        this.workflowInstanceRepository = workflowInstanceRepository;
-        this.workflowOrchestrationService = workflowOrchestrationService;
         this.objectMapper = objectMapper;
     }
 
     @Override
     @Transactional
-    public void dispatchStep(
-        WorkflowInstance workflowInstance,
-        StepExecution stepExecution,
-        int attemptNumber
-    ) {
+    public void dispatchStep(WorkflowInstance workflowInstance, StepExecution stepExecution, int attemptNumber) {
         stepExecution.setStatus(StepStatus.DISPATCHED);
         stepExecution.setStartedAt(Instant.now());
-
         StepExecution persistedStep = stepExecutionRepository.save(stepExecution);
 
         TaskDispatchMessage dispatchMessage = new TaskDispatchMessage(
@@ -66,13 +50,7 @@ public class StepDispatchServiceImpl implements StepDispatchService {
         );
 
         String targetTopic = persistedStep.getStepDefinition().getTargetTopic();
-
-        workflowKafkaTemplate.send(
-            targetTopic,
-            workflowInstance.getId().toString(),
-            dispatchMessage
-        );
-
+        workflowKafkaTemplate.send(targetTopic, workflowInstance.getId().toString(), dispatchMessage);
         logger.info(
             "Dispatched task '{}' (attempt {}) for workflow instance {} to topic {}",
             persistedStep.getStepDefinition().getTaskName(),
@@ -82,40 +60,12 @@ public class StepDispatchServiceImpl implements StepDispatchService {
         );
     }
 
-    @Override
-    public void handleTaskResult(TaskResultMessage message) {
-        workflowInstanceRepository.findById(message.workflowInstanceId())
-            .orElseThrow(() ->
-                new WorkflowInstanceNotFoundException(message.workflowInstanceId())
-            );
-
-        if (message.successful()) {
-            workflowOrchestrationService.advanceAfterStepSuccess(
-                message.workflowInstanceId(),
-                message.stepExecutionId()
-            );
-        } else {
-            workflowOrchestrationService.handleStepFailure(
-                message.workflowInstanceId(),
-                message.stepExecutionId(),
-                message.errorMessage() != null
-                    ? message.errorMessage()
-                    : "Task reported failure without a message"
-            );
-        }
-    }
-
     @SuppressWarnings("unchecked")
     private Map<String, Object> deserializeInstancePayload(String payload) {
         try {
-            return payload != null
-                ? objectMapper.readValue(payload, Map.class)
-                : Map.of();
+            return payload != null ? objectMapper.readValue(payload, Map.class) : Map.of();
         } catch (Exception deserializationException) {
-            logger.warn(
-                "Failed to deserialize payload for dispatch, sending empty payload: {}",
-                deserializationException.getMessage()
-            );
+            logger.warn("Failed to deserialize payload for dispatch, sending empty payload: {}", deserializationException.getMessage());
             return Map.of();
         }
     }

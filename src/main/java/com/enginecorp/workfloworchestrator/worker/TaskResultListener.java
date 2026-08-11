@@ -1,7 +1,7 @@
 package com.enginecorp.workfloworchestrator.worker;
 
 import com.enginecorp.workfloworchestrator.dto.messaging.TaskResultMessage;
-import com.enginecorp.workfloworchestrator.service.StepDispatchService;
+import com.enginecorp.workfloworchestrator.service.WorkflowOrchestrationService;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,10 +14,10 @@ public class TaskResultListener {
 
     private static final Logger logger = LoggerFactory.getLogger(TaskResultListener.class);
 
-    private final StepDispatchService stepDispatchService;
+    private final WorkflowOrchestrationService workflowOrchestrationService;
 
-    public TaskResultListener(StepDispatchService stepDispatchService) {
-        this.stepDispatchService = stepDispatchService;
+    public TaskResultListener(WorkflowOrchestrationService workflowOrchestrationService) {
+        this.workflowOrchestrationService = workflowOrchestrationService;
     }
 
     @KafkaListener(
@@ -33,7 +33,17 @@ public class TaskResultListener {
                 message.workflowInstanceId(),
                 message.successful()
             );
-            stepDispatchService.handleTaskResult(message);
+
+            if (message.successful()) {
+                workflowOrchestrationService.advanceAfterStepSuccess(message.workflowInstanceId(), message.stepExecutionId());
+            } else {
+                workflowOrchestrationService.handleStepFailure(
+                    message.workflowInstanceId(),
+                    message.stepExecutionId(),
+                    message.errorMessage() != null ? message.errorMessage() : "Task reported failure without a message"
+                );
+            }
+
             acknowledgment.acknowledge();
         } catch (Exception processingException) {
             logger.error(

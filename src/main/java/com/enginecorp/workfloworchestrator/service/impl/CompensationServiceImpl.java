@@ -119,6 +119,15 @@ public class CompensationServiceImpl implements CompensationService {
             .findFirst()
             .orElseThrow(() -> new WorkflowInstanceNotFoundException(message.workflowInstanceId()));
 
+        if (compensatedStep.getStatus() != StepStatus.COMPENSATING) {
+            logger.debug(
+                "Ignoring compensation result for step {} in state {} — expected COMPENSATING, likely a duplicate delivery",
+                compensatedStep.getId(),
+                compensatedStep.getStatus()
+            );
+            return;
+        }
+
         if (!message.successful()) {
             compensatedStep.setLastError(message.errorMessage());
             logger.error(

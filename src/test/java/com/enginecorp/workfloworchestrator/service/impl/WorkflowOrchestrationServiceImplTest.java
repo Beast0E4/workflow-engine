@@ -62,10 +62,12 @@ class WorkflowOrchestrationServiceImplTest {
         );
 
         WorkflowDefinition definition = new WorkflowDefinition();
+        definition.setId(UUID.randomUUID());
         definition.setName("order-fulfillment");
         definition.setVersion(1);
 
         WorkflowStepDefinition firstStepDefinition = new WorkflowStepDefinition();
+        firstStepDefinition.setId(UUID.randomUUID());
         firstStepDefinition.setStepOrder(0);
         firstStepDefinition.setTaskName("reserve-inventory");
         firstStepDefinition.setCompensationTaskName("release-inventory");
@@ -73,6 +75,7 @@ class WorkflowOrchestrationServiceImplTest {
         firstStepDefinition.setRetryLimit(2);
 
         WorkflowStepDefinition secondStepDefinition = new WorkflowStepDefinition();
+        secondStepDefinition.setId(UUID.randomUUID());
         secondStepDefinition.setStepOrder(1);
         secondStepDefinition.setTaskName("charge-payment");
         secondStepDefinition.setCompensationTaskName("refund-payment");
@@ -83,16 +86,19 @@ class WorkflowOrchestrationServiceImplTest {
         definition.addStep(secondStepDefinition);
 
         instance = new WorkflowInstance();
+        instance.setId(UUID.randomUUID());
         instance.setWorkflowDefinition(definition);
         instance.setStatus(WorkflowStatus.RUNNING);
         instance.setCurrentStepIndex(0);
 
         firstStep = new StepExecution();
+        firstStep.setId(UUID.randomUUID());
         firstStep.setStepDefinition(firstStepDefinition);
         firstStep.setStatus(StepStatus.DISPATCHED);
         instance.addStepExecution(firstStep);
 
         secondStep = new StepExecution();
+        secondStep.setId(UUID.randomUUID());
         secondStep.setStepDefinition(secondStepDefinition);
         secondStep.setStatus(StepStatus.PENDING);
         instance.addStepExecution(secondStep);

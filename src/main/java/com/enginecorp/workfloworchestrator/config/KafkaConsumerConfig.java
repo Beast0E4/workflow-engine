@@ -9,10 +9,12 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
+import org.springframework.kafka.core.KafkaOperations;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.listener.ContainerProperties;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
@@ -60,26 +62,35 @@ public class KafkaConsumerConfig {
     }
 
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, TaskResultMessage> taskResultListenerContainerFactory() {
-        ConcurrentKafkaListenerContainerFactory<String, TaskResultMessage> factory =
-            new ConcurrentKafkaListenerContainerFactory<>();
+    public DefaultErrorHandler workflowResultErrorHandler(KafkaOperations<String, Object> deadLetterKafkaOperations) {
+        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
+            deadLetterKafkaOperations,
+            (record, exception) -> new org.apache.kafka.common.TopicPartition(record.topic() + ".dlt", record.partition())
+        );
+        DefaultErrorHandler errorHandler = new DefaultErrorHandler(recoverer, new FixedBackOff(1000L, 3L));
+        errorHandler.addNotRetryableExceptions(IllegalArgumentException.class);
+        return errorHandler;
+    }
 
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, TaskResultMessage> taskResultListenerContainerFactory(
+        DefaultErrorHandler workflowResultErrorHandler
+    ) {
+        ConcurrentKafkaListenerContainerFactory<String, TaskResultMessage> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(taskResultConsumerFactory());
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-        factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(1000L, 3L)));
-
+        factory.setCommonErrorHandler(workflowResultErrorHandler);
         return factory;
     }
 
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, CompensationResultMessage> compensationResultListenerContainerFactory() {
-        ConcurrentKafkaListenerContainerFactory<String, CompensationResultMessage> factory =
-            new ConcurrentKafkaListenerContainerFactory<>();
-
+    public ConcurrentKafkaListenerContainerFactory<String, CompensationResultMessage> compensationResultListenerContainerFactory(
+        DefaultErrorHandler workflowResultErrorHandler
+    ) {
+        ConcurrentKafkaListenerContainerFactory<String, CompensationResultMessage> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(compensationResultConsumerFactory());
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-        factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(1000L, 3L)));
-
+        factory.setCommonErrorHandler(workflowResultErrorHandler);
         return factory;
     }
 }

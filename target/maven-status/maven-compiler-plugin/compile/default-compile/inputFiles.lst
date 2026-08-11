@@ -1,4 +1,5 @@
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\config\AsyncExecutorConfig.java
+C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\config\JacksonConfig.java
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\config\JpaAuditingConfig.java
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\config\KafkaConsumerConfig.java
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\config\KafkaProducerConfig.java
@@ -30,6 +31,7 @@ C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workflowor
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\model\WorkflowStepDefinition.java
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\repository\impl\StepExecutionRepositoryCustomImpl.java
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\repository\StepExecutionRepository.java
+C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\repository\StepExecutionRepositoryCustom.java
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\repository\WorkflowDefinitionRepository.java
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\repository\WorkflowInstanceRepository.java
 C:\Users\ebiso\Documents\workflow-engine\src\main\java\com\enginecorp\workfloworchestrator\repository\WorkflowStepDefinitionRepository.java

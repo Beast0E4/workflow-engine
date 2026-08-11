@@ -4,7 +4,6 @@ server:
 spring:
   application:
     name: workflow-orchestrator
-
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:workflow_engine}
     username: ${DB_USERNAME:workflow_user}
@@ -14,7 +13,6 @@ spring:
       minimum-idle: 5
       connection-timeout: 30000
       pool-name: workflow-engine-hikari-pool
-
   jpa:
     hibernate:
       ddl-auto: validate
@@ -25,12 +23,10 @@ spring:
           batch_size: 25
         order_inserts: true
         order_updates: true
-
   flyway:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
-
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -41,7 +37,6 @@ spring:
       properties:
         enable.idempotence: true
         max.in.flight.requests.per.connection: 5
-
     consumer:
       group-id: workflow-orchestrator-engine
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
@@ -61,16 +56,13 @@ workflow-engine:
       compensation-result: workflow.compensation.result
       partitions: 6
       replication-factor: 1
-
   retry:
     default-max-attempts: 3
     backoff-initial-ms: 2000
     backoff-multiplier: 2.0
     scheduler-fixed-delay-ms: 5000
-
   lock:
     wait-time-seconds: 5
-    lease-time-seconds: 30
 
 redisson:
   address: redis://${REDIS_HOST:localhost}:${REDIS_PORT:6379}

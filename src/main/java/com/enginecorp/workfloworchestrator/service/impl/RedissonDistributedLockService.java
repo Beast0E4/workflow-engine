@@ -14,31 +14,24 @@ import org.springframework.stereotype.Service;
 @Service
 public class RedissonDistributedLockService implements DistributedLockService {
 
-    private static final Logger logger =
-            LoggerFactory.getLogger(RedissonDistributedLockService.class);
-
+    private static final Logger logger = LoggerFactory.getLogger(RedissonDistributedLockService.class);
     private static final String LOCK_KEY_PREFIX = "workflow-engine:lock:";
 
     private final RedissonClient redissonClient;
     private final long waitTimeSeconds;
-    private final long leaseTimeSeconds;
 
     public RedissonDistributedLockService(
-            RedissonClient redissonClient,
-            @Value("${workflow-engine.lock.wait-time-seconds}") long waitTimeSeconds,
-            @Value("${workflow-engine.lock.lease-time-seconds}") long leaseTimeSeconds) {
-
+        RedissonClient redissonClient,
+        @Value("${workflow-engine.lock.wait-time-seconds}") long waitTimeSeconds
+    ) {
         this.redissonClient = redissonClient;
         this.waitTimeSeconds = waitTimeSeconds;
-        this.leaseTimeSeconds = leaseTimeSeconds;
     }
 
     @Override
     public <T> T executeWithLock(String lockKey, Supplier<T> action) {
         RLock lock = redissonClient.getLock(LOCK_KEY_PREFIX + lockKey);
-
         tryAcquire(lock, lockKey);
-
         try {
             return action.get();
         } finally {
@@ -54,16 +47,12 @@ public class RedissonDistributedLockService implements DistributedLockService {
         });
     }
 
-    private boolean tryAcquire(RLock lock, String lockKey) {
+    private void tryAcquire(RLock lock, String lockKey) {
         try {
-            boolean acquired =
-                    lock.tryLock(waitTimeSeconds, leaseTimeSeconds, TimeUnit.SECONDS);
-
+            boolean acquired = lock.tryLock(waitTimeSeconds, TimeUnit.SECONDS);
             if (!acquired) {
                 throw new DistributedLockAcquisitionException(lockKey);
             }
-
-            return true;
         } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
             throw new DistributedLockAcquisitionException(lockKey);
@@ -74,10 +63,7 @@ public class RedissonDistributedLockService implements DistributedLockService {
         if (lock.isHeldByCurrentThread()) {
             lock.unlock();
         } else {
-            logger.debug(
-                    "Skipping unlock for {} — lock not held by current thread",
-                    lock.getName()
-            );
+            logger.debug("Skipping unlock for {} — lock not held by current thread", lock.getName());
         }
     }
 }
